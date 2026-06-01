@@ -48,15 +48,15 @@ async def get_access_token() -> str:
 
 # ─── Lark API helpers ─────────────────────────────────────────────────────────
 
-async def send_message(chat_id: str, text: str):
+async def send_message(receive_id: str, text: str, id_type: str = "chat_id"):
     """Gửi text message vào chat/DM."""
     token = await get_access_token()
     async with httpx.AsyncClient() as client:
         r = await client.post(
-            f"{LARK_BASE_URL}/im/v1/messages?receive_id_type=open_id",
+            f"{LARK_BASE_URL}/im/v1/messages?receive_id_type={id_type}",
             headers={"Authorization": f"Bearer {token}"},
             json={
-                "receive_id": chat_id,
+                "receive_id": receive_id,
                 "msg_type": "text",
                 "content": json.dumps({"text": text}),
             },
@@ -175,7 +175,7 @@ Khi user hỏi bình thường → dùng tool reply_message để trả lời.
 Trả lời tiếng Việt, ngắn gọn, thân thiện."""
 
 
-async def execute_tool(tool_name: str, tool_input: dict, chat_id: str) -> str:
+async def execute_tool(tool_name: str, tool_input: dict, chat_id: str, id_type: str = "chat_id") -> str:
     try:
         if tool_name == "create_task":
             result = await create_task(
@@ -206,7 +206,7 @@ async def execute_tool(tool_name: str, tool_input: dict, chat_id: str) -> str:
             return "✅ Đã thêm record!"
 
         elif tool_name == "reply_message":
-            await send_message(chat_id, tool_input["text"])
+            await send_message(chat_id, tool_input["text"], id_type)
             return "sent"
 
     except Exception as e:
@@ -217,7 +217,7 @@ async def execute_tool(tool_name: str, tool_input: dict, chat_id: str) -> str:
 
 # ─── Claude agentic loop ──────────────────────────────────────────────────────
 
-async def process_with_claude(user_message: str, chat_id: str):
+async def process_with_claude(user_message: str, chat_id: str, id_type: str = "chat_id"):
     try:
         messages = [{"role": "user", "content": user_message}]
 
@@ -233,13 +233,13 @@ async def process_with_claude(user_message: str, chat_id: str):
             if response.stop_reason == "end_turn":
                 for block in response.content:
                     if hasattr(block, "text") and block.text:
-                        await send_message(chat_id, block.text)
+                        await send_message(chat_id, block.text, id_type)
                 return
 
             tool_results = []
             for block in response.content:
                 if block.type == "tool_use":
-                    result = await execute_tool(block.name, block.input, chat_id)
+                    result = await execute_tool(block.name, block.input, chat_id, id_type)
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -255,7 +255,7 @@ async def process_with_claude(user_message: str, chat_id: str):
     except Exception as e:
         # Luôn gửi phản hồi dù có lỗi
         try:
-            await send_message(chat_id, f"Xin lỗi, có lỗi xảy ra: {str(e)[:100]}")
+            await send_message(chat_id, f"Xin lỗi, có lỗi xảy ra: {str(e)[:100]}", id_type)
         except Exception:
             pass
 
@@ -297,11 +297,17 @@ async def lark_webhook(request: Request):
             return JSONResponse({"code": 0})
 
         msg = event.get("message", {})
+        chat_type = msg.get("chat_type", "")   # "p2p" = DM, "group" = nhóm
         chat_id = msg.get("chat_id", "")
-
-        # Lấy open_id để reply DM
         open_id = sender.get("sender_id", {}).get("open_id", "")
-        reply_to = chat_id if chat_id else open_id
+
+        # DM → dùng open_id | Group → dùng chat_id
+        if chat_type == "p2p" and open_id:
+            reply_to = open_id
+            id_type = "open_id"
+        else:
+            reply_to = chat_id
+            id_type = "chat_id"
 
         content_raw = msg.get("content", "{}")
         try:
@@ -311,7 +317,7 @@ async def lark_webhook(request: Request):
 
         if text and reply_to:
             import asyncio
-            asyncio.create_task(process_with_claude(text, reply_to))
+            asyncio.create_task(process_with_claude(text, reply_to, id_type))
 
     return JSONResponse({"code": 0})
 
